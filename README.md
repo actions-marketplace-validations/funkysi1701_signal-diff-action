@@ -86,6 +86,15 @@ Failures in this step are **non-fatal** (logged only).
 
 The workflow always fails if the crawl itself fails to complete.
 
+## Troubleshooting trigger failures
+
+| Log pattern | Meaning |
+| --- | --- |
+| `HTTP 429` on `/api/trigger/ci` (v1.10+ exits here) | API was reached. Wait for pending/running crawls, or wait out the per-key trigger rate limit / edge `Retry-After`. Later **405** lines (if any on older tags) are static-site noise — not a wrong `api_base_url`. |
+| `HTTP 401` / `403` on `/api/trigger/ci` | Wrong or unpaid API key. |
+| `HTTP 404` then **405** with `Allow: GET, HEAD, OPTIONS` | `api_base_url` likely includes a trailing `/api` (action posts `/api/api/trigger/ci`). Use origin only, e.g. `https://signaldiff.dev`. |
+| First attempt **405** with `Allow: GET, HEAD, OPTIONS` | `api_base_url` points at a static frontend/CDN host with no Functions API. |
+
 ## Customer agent routing
 
 Set `execution_mode: agent` to queue the crawl for a **customer agent** instead of Signal Diff cloud execution. The action sends `executionMode` and optional `agentPoolId` on `POST {api_base_url}/api/trigger/ci` (same fields as the API’s CI trigger body).
@@ -196,6 +205,7 @@ Note: no `actions/checkout` step is needed — this action is referenced by name
 
 | Tag | Notes |
 | --- | --- |
+| `v1.10` | Stop URL fallbacks when canonical `POST /api/trigger/ci` returns **429**, **5xx**, **401**, or **403**. Surface the response body and `Retry-After` for rate limits instead of misreporting a frontend/CDN host from later static-site **405**s. |
 | `v1.9` | Inline PR review comments on high-risk and config file changes (`inline_annotations`, default off; `annotation_max_files`, default 3). Idempotent markers update existing bot comments on re-run. Requires `pull-requests: write` and `collect_code_changes`. |
 | `v1.8` | Rule-based PR risk score in the summary table (`risk_score_enabled`, default `true`). Combines changed-path signals (auth, payment, migration, production config, etc.) with SEO run-diff and crawl counts. Also adds file change categorization (code/tests/config/…) and GitHub Compare line stats in PR comments and `ci-changes` payloads. |
 | `v1.7` | PR comment redesign: decision-focused **Signal Diff Report** with pass/fail verdict, severity label, summary metrics table, baseline before/after comparison, capped new findings, and separate SEO vs repository-change sections. Same report is appended to the GitHub Actions step summary. |

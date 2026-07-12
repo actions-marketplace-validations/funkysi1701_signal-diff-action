@@ -233,10 +233,18 @@ runs:
         response=""
         http_code=""
         selected_url=""
+        first_http_code=""
+        first_url_was_canonical="false"
         saw_static_methods_405="false"
         for url in "${candidate_urls[@]}"; do
           echo "Calling ${url}"
           http_code="$(call_trigger "${url}")"
+          if [[ -z "${first_http_code}" ]]; then
+            first_http_code="${http_code}"
+            if [[ "${url}" == */api/trigger/ci ]]; then
+              first_url_was_canonical="true"
+            fi
+          fi
           if [[ "${http_code}" -ge 200 && "${http_code}" -lt 300 ]]; then
             selected_url="${url}"
             response="$(cat /tmp/trigger-ci-response.txt)"
@@ -252,21 +260,49 @@ runs:
             fi
           fi
 
-          if [[ "${url}" == */api/trigger/ci && ( "${http_code}" == "401" || "${http_code}" == "403" ) ]]; then
-            echo "Reached CI trigger endpoint but authentication failed (HTTP ${http_code})."
-            echo "Verify api_key matches Trigger:CiApiKey (or generated CI key in Cosmos)."
-            echo "--- response body ---"
-            cat /tmp/trigger-ci-response.txt || true
-            exit 1
+          # Canonical route reached the Functions API — do not try static-site fallbacks.
+          if [[ "${url}" == */api/trigger/ci ]]; then
+            case "${http_code}" in
+              401|403)
+                echo "Reached CI trigger endpoint but authentication failed (HTTP ${http_code})."
+                echo "Verify api_key is a paid org key (sck_…) or matches Trigger:CiApiKey on self-hosted."
+                echo "--- response body ---"
+                cat /tmp/trigger-ci-response.txt || true
+                exit 1
+                ;;
+              429)
+                echo "Reached CI trigger endpoint but was rate-limited (HTTP 429)."
+                echo "Likely causes: organization concurrent crawl limit, API CiTrigger rate limit (10/hour per key),"
+                echo "or an edge/WAF rate limit. Wait for active crawls to finish, then re-run."
+                retry_after="$(awk 'BEGIN{IGNORECASE=1} /^Retry-After:/{print $2; exit}' /tmp/trigger-ci-headers.txt | tr -d '\r' || true)"
+                if [[ -n "${retry_after}" ]]; then
+                  echo "Retry-After: ${retry_after}"
+                fi
+                echo "--- response body ---"
+                cat /tmp/trigger-ci-response.txt || true
+                exit 1
+                ;;
+              500|502|503)
+                echo "Reached CI trigger endpoint but the API returned HTTP ${http_code}."
+                echo "Check Functions health (GET {api_base_url}/api/health) and API logs."
+                echo "--- response body ---"
+                cat /tmp/trigger-ci-response.txt || true
+                exit 1
+                ;;
+            esac
           fi
         done
 
         if [[ -z "${response}" ]]; then
           echo "CI trigger failed after trying ${#candidate_urls[@]} URL shape(s)."
           echo "api_base_url input was: ${API_BASE_URL}"
-          if [[ "${saw_static_methods_405}" == "true" ]]; then
+          # Only blame CDN when the first attempt looked like a static host (not after 429/5xx fallbacks).
+          if [[ "${saw_static_methods_405}" == "true" && "${first_http_code}" == "405" ]]; then
             echo "Detected static-site response (Allow: GET, HEAD, OPTIONS)."
             echo "api_base_url likely points at a frontend/CDN route, not the Functions API host."
+          elif [[ "${saw_static_methods_405}" == "true" && "${first_url_was_canonical}" == "true" && "${first_http_code}" == "404" ]]; then
+            echo "Canonical /api/trigger/ci returned 404; later 405s are static-site noise."
+            echo "If api_base_url ends with /api, strip it (action already appends /api/trigger/ci)."
           fi
           echo "--- last response headers ---"
           cat /tmp/trigger-ci-headers.txt || true
